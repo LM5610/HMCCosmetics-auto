@@ -2,7 +2,7 @@ name: Sync Fork
 
 on:
   schedule:
-    - cron: '* * * * *'  # 每分钟执行
+    - cron: '* * * * *'
   workflow_dispatch:
 
 jobs:
@@ -18,7 +18,7 @@ jobs:
         ref: remapped
 
     - name: Add upstream remote
-      run: git remote add upstream https://github.com/原始项目用户名/主项目名.git  # 替换为主项目的 URL
+      run: git remote add upstream https://github.com/HibiscusMC/HMCCosmetics.git
 
     - name: Fetch upstream changes
       run: git fetch upstream
