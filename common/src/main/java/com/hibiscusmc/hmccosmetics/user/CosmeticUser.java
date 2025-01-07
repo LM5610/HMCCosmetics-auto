@@ -13,6 +13,7 @@ import com.hibiscusmc.hmccosmetics.cosmetic.types.CosmeticArmorType;
 import com.hibiscusmc.hmccosmetics.cosmetic.types.CosmeticBackpackType;
 import com.hibiscusmc.hmccosmetics.cosmetic.types.CosmeticBalloonType;
 import com.hibiscusmc.hmccosmetics.cosmetic.types.CosmeticMainhandType;
+import com.hibiscusmc.hmccosmetics.database.UserData;
 import com.hibiscusmc.hmccosmetics.gui.Menus;
 import com.hibiscusmc.hmccosmetics.user.manager.UserBackpackManager;
 import com.hibiscusmc.hmccosmetics.user.manager.UserBalloonManager;
@@ -38,6 +39,7 @@ import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.*;
 import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.scheduler.BukkitTask;
+import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 import java.util.*;
@@ -58,12 +60,20 @@ public class CosmeticUser {
 
     // Cosmetic Settings/Toggles
     private final ArrayList<HiddenReason> hiddenReason = new ArrayList<>();
-    private final HashMap<CosmeticSlot, ItemStack> cachedCosmeticItems = new HashMap<>();
     private final HashMap<CosmeticSlot, Color> colors = new HashMap<>();
+    // Cosmetic caches
+    private final HashMap<String, ItemStack> cosmeticItems = new HashMap<>();
 
     public CosmeticUser(UUID uuid) {
         this.uniqueId = uuid;
         userEmoteManager = new UserEmoteManager(this);
+        tick();
+    }
+
+    public CosmeticUser(UUID uuid, UserData data) {
+        this.uniqueId = uuid;
+        userEmoteManager = new UserEmoteManager(this);
+        loadData(data);
         tick();
     }
 
@@ -88,6 +98,54 @@ public class CosmeticUser {
         despawnBalloon();
     }
 
+    public void loadData(@NotNull UserData data) {
+        boolean permissionCheck = Settings.isForcePermissionJoin();
+
+        for (Map.Entry<CosmeticSlot, Map.Entry<Cosmetic, Integer>> entry : data.getCosmetics().entrySet()) {
+            Cosmetic cosmetic = entry.getValue().getKey();
+            Color color = entry.getValue().getValue() == -1 ? null : Color.fromRGB(entry.getValue().getValue());
+
+            if (permissionCheck && cosmetic.requiresPermission()) {
+                if (getPlayer() != null && !getPlayer().hasPermission(cosmetic.getPermission())) {
+                    continue;
+                }
+            }
+            addPlayerCosmetic(cosmetic, color);
+        }
+
+        if (!hiddenReason.isEmpty()) {
+            for (CosmeticUser.HiddenReason reason : hiddenReason) silentlyAddHideFlag(reason);
+        } else {
+            for (HiddenReason reason : data.getHiddenReasons()) {
+                if (getPlayer() != null && Settings.isDisabledGamemodesEnabled() && Settings.getDisabledGamemodes().contains(getPlayer().getGameMode().toString())) {
+                    MessagesUtil.sendDebugMessages("Hiding Cosmetics due to gamemode");
+                    hideCosmetics(CosmeticUser.HiddenReason.GAMEMODE);
+                    return;
+                } else {
+                    if (isHidden(CosmeticUser.HiddenReason.GAMEMODE)) {
+                        MessagesUtil.sendDebugMessages("Join Gamemode Check: Showing Cosmetics");
+                        showCosmetics(CosmeticUser.HiddenReason.GAMEMODE);
+                        return;
+                    }
+                }
+                // Handle world check
+                if (getPlayer() != null && Settings.getDisabledWorlds().contains(getPlayer().getWorld().getName())) {
+                    MessagesUtil.sendDebugMessages("Hiding Cosmetics due to world");
+                    hideCosmetics(CosmeticUser.HiddenReason.WORLD);
+                } else {
+                    if (isHidden(CosmeticUser.HiddenReason.WORLD)) {
+                        MessagesUtil.sendDebugMessages("Join World Check: Showing Cosmetics");
+                        showCosmetics(CosmeticUser.HiddenReason.WORLD);
+                    }
+                }
+                if (Settings.isAllPlayersHidden()) {
+                    hideCosmetics(CosmeticUser.HiddenReason.DISABLED);
+                }
+                silentlyAddHideFlag(reason);
+            }
+        }
+    }
+
     public Cosmetic getCosmetic(CosmeticSlot slot) {
         return playerCosmetics.get(slot);
     }
@@ -96,11 +154,11 @@ public class CosmeticUser {
         return ImmutableList.copyOf(playerCosmetics.values());
     }
 
-    public void addPlayerCosmetic(Cosmetic cosmetic) {
+    public void addPlayerCosmetic(@NotNull Cosmetic cosmetic) {
         addPlayerCosmetic(cosmetic, null);
     }
 
-    public void addPlayerCosmetic(Cosmetic cosmetic, Color color) {
+    public void addPlayerCosmetic(@NotNull Cosmetic cosmetic, @Nullable Color color) {
         // API
         PlayerCosmeticEquipEvent event = new PlayerCosmeticEquipEvent(this, cosmetic);
         Bukkit.getPluginManager().callEvent(event);
@@ -157,7 +215,6 @@ public class CosmeticUser {
         if (slot == CosmeticSlot.EMOTE) {
             if (getUserEmoteManager().isPlayingEmote()) getUserEmoteManager().stopEmote(UserEmoteManager.StopEmoteReason.UNEQUIP);
         }
-        cachedCosmeticItems.remove(slot);
         colors.remove(slot);
         playerCosmetics.remove(slot);
         removeArmor(slot);
@@ -223,15 +280,11 @@ public class CosmeticUser {
         return getUserCosmeticItem(cosmetic);
     }
 
-    public ItemStack getUserCosmeticItem(Cosmetic cosmetic) {
+    public ItemStack getUserCosmeticItem(@NotNull Cosmetic cosmetic) {
         ItemStack item = null;
         if (!hiddenReason.isEmpty()) {
             if (cosmetic instanceof CosmeticBackpackType || cosmetic instanceof CosmeticBalloonType) return new ItemStack(Material.AIR);
             return getPlayer().getInventory().getItem(HMCCInventoryUtils.getEquipmentSlot(cosmetic.getSlot()));
-        }
-        // Check if the item is cached. This helps with performance as we don't need to keep recreating the item
-        if (cachedCosmeticItems.containsKey(cosmetic.getSlot())) {
-            return cachedCosmeticItems.get(cosmetic.getSlot());
         }
         if (cosmetic instanceof CosmeticArmorType armorType) {
             item = armorType.getItem(this, cosmetic.getItem());
@@ -250,14 +303,10 @@ public class CosmeticUser {
     }
 
     @SuppressWarnings("deprecation")
-    public ItemStack getUserCosmeticItem(Cosmetic cosmetic, ItemStack item) {
+    public ItemStack getUserCosmeticItem(@NotNull Cosmetic cosmetic, @Nullable ItemStack item) {
         if (item == null) {
             //MessagesUtil.sendDebugMessages("GetUserCosemticUser Item is null");
             return new ItemStack(Material.AIR);
-        }
-        // Check if the item is cached. This helps with performance as we don't need to keep recreating the item
-        if (cachedCosmeticItems.containsKey(cosmetic.getSlot())) {
-            return cachedCosmeticItems.get(cosmetic.getSlot());
         }
         if (item.hasItemMeta()) {
             ItemMeta itemMeta = item.getItemMeta();
@@ -285,18 +334,22 @@ public class CosmeticUser {
                 itemMeta = skullMeta;
             }
 
-            List<String> processedLore = new ArrayList<>();
-
-            if (itemMeta.hasLore()) {
-                for (String loreLine : itemMeta.getLore()) {
-                    processedLore.add(Hooks.processPlaceholders(getPlayer(), loreLine));
+            if (Settings.isItemProcessingDisplayName()) {
+                if (itemMeta.hasDisplayName()) {
+                    String displayName = itemMeta.getDisplayName();
+                    itemMeta.setDisplayName(Hooks.processPlaceholders(getPlayer(), displayName));
                 }
             }
-            if (itemMeta.hasDisplayName()) {
-                String displayName = itemMeta.getDisplayName();
-                itemMeta.setDisplayName(Hooks.processPlaceholders(getPlayer(), displayName));
+            if (Settings.isItemProcessingLore()) {
+                List<String> processedLore = new ArrayList<>();
+                if (itemMeta.hasLore()) {
+                    for (String loreLine : itemMeta.getLore()) {
+                        processedLore.add(Hooks.processPlaceholders(getPlayer(), loreLine));
+                    }
+                }
+                itemMeta.setLore(processedLore);
             }
-            itemMeta.setLore(processedLore);
+
 
             if (colors.containsKey(cosmetic.getSlot())) {
                 Color color = colors.get(cosmetic.getSlot());
@@ -322,7 +375,6 @@ public class CosmeticUser {
 
             item.setItemMeta(itemMeta);
         }
-        cachedCosmeticItems.put(cosmetic.getSlot(), item);
         return item;
     }
 
@@ -334,7 +386,7 @@ public class CosmeticUser {
         return userWardrobeManager;
     }
 
-    public void enterWardrobe(boolean ignoreDistance, Wardrobe wardrobe) {
+    public void enterWardrobe(boolean ignoreDistance, @NotNull Wardrobe wardrobe) {
         if (wardrobe.hasPermission() && !getPlayer().hasPermission(wardrobe.getPermission())) {
             MessagesUtil.sendMessage(getPlayer(), "no-permission");
             return;
@@ -435,10 +487,6 @@ public class CosmeticUser {
 
     public void despawnBalloon() {
         if (this.userBalloonManager == null) return;
-        List<Player> sentTo = HMCCPlayerUtils.getNearbyPlayers(getEntity().getLocation());
-
-        HMCCPacketManager.sendEntityDestroyPacket(userBalloonManager.getPufferfishBalloonId(), sentTo);
-
         this.userBalloonManager.remove();
         this.userBalloonManager = null;
     }
