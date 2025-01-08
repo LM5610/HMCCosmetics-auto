@@ -17,6 +17,11 @@ jobs:
         token: ${{ secrets.GITHUB_TOKEN }}
         ref: remapped
 
+    - name: Set up Git config
+      run: |
+        git config --global user.name "LM5610"
+        git config --global user.email "c3589175557@outlook.com"
+
     - name: Add upstream remote
       run: git remote add upstream https://github.com/HibiscusMC/HMCCosmetics.git
 
